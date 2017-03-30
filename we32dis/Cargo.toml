@@ -1,0 +1,7 @@
+[package]
+name = "we32dis"
+version = "0.1.0"
+authors = ["Seth Morabito <web@loomcom.com>"]
+
+[dependencies]
+clap = "2.22.1"

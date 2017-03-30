@@ -1,0 +1,6 @@
+[package]
+name = "we32as"
+version = "0.1.0"
+authors = ["Seth Morabito <web@loomcom.com>"]
+
+[dependencies]
