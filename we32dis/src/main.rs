@@ -6,9 +6,37 @@ use std::io::prelude::*;
 use std::path::Path;
 use std::vec::Vec;
 use clap::{Arg, App};
+use we32k::get_opcodes;
+
+mod we32k;
 
 fn disassemble(buf: &Vec<u8>) {
     println!("I'm disassembling a {} byte buffer", buf.len());
+
+    let opcodes = get_opcodes();
+
+    println!("I have {} opcodes to look at.", opcodes.len());
+
+    let mut i = 0;
+    let mut op: u16;
+
+    while i < buf.len() {
+        op = buf[i] as u16;
+
+        // Not all opcodes are one byte. All opcodes starting with
+        // 0x30 are two-bytes long.
+        if op == 0x30 {
+            // Fetch the second byte of the opcode.
+            op = 0x3000 | buf[i + 1] as u16;
+            i = i + 1;
+        }
+
+        println!("0x{:04x}", op);
+
+        i += 1;
+    }
+
+    println!();
 }
 
 fn main() {
