@@ -1,11 +1,24 @@
 #include <stdio.h>
 #include <stdint.h>
 
+#define SID(va)           (((va) >> 30) & 3)
+#define SSL(va)           (((va) >> 17) & 0x1fff)
+#define SOT(va)           (va & 0x1ffff)
+#define PSL(va)           (((va) >> 11) & 0x3f)
+#define POT(va)           (va & 0x7ff)
+
 #define PD_TAG(vaddr)     (((vaddr >> 13) & 0xf) | ((vaddr >> 14) & 0xfff0))
 #define PD_IDX(vaddr)     (((vaddr >> 11) & 3) | ((vaddr >> 15) & 4))
 
 void print_paged_vaddr(uint32_t vaddr) {
     printf("     Paged Virtual Address 0x%08x\n\n", vaddr);
+    printf("SID: %d\n", SID(vaddr));
+    printf("SSL: %x\n", SSL(vaddr));
+    printf("SOT: %x\n", SOT(vaddr));
+    printf("PSL: %x\n", PSL(vaddr));
+    printf("POT: %x\n", POT(vaddr));
+
+    printf("\n\n");
 
     printf(" 31 30 29 28 27 26 25 24 23 22 21 20 19 18 17 16 15 14 13 12 11 10 09 08 07 06 05 04 03 02 01 00\n");
     printf("+-----+-----------------------------------.--+-----------.--.--+--------------------------------+\n");
