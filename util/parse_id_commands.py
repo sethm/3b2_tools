@@ -30,9 +30,13 @@ import csv
 import sys
 from decimal import *
 
+def to_char(char):
+    if char >= 0x20 and char < 0x7f:
+        return char
+    else:
+        return 0x2e
+
 class CommandParser:
-
-
     def get_command_name(self, val):
         """Translate a 1-byte command into a name"""
 
@@ -60,13 +64,13 @@ class CommandParser:
                 return "AUX:CLCE"
         else:
             if cmd == 1:
-                return "Sense Int. Status - %d" % unit
+                return "Sense Int. Status"
             if cmd == 2:
-                return "Specify - %d" % unit
+                return "Specify"
             if cmd == 3:
                 return "Sense Unit Status - %d" % unit
             if cmd == 4:
-                return "Detect Error - %d" % unit
+                return "Detect Error"
             if cmd == 5:
                 if is_bufskew:
                     return "Recalibrate [B] - %d" % unit
@@ -123,10 +127,10 @@ class CommandParser:
 
         skip_line = False
 
-        r_state    = num & 0x1
-        w_state    = (num & 0x2) >> 1
-        a0_state   = (num & 0x4) >> 2
-        cs_state   = (num & 0x800) >> 11
+        cs_state   = num & 0x1
+        a0_state   = (num & 0x2) >> 1
+        r_state    = (num & 0x4) >> 2
+        w_state    = (num & 0x8) >> 3
         is_read    = self.last_r_state == 0
         is_write   = self.last_w_state == 0
         is_command = a0_state == 1 and is_write
@@ -180,7 +184,7 @@ class CommandParser:
         elif is_data:
             buf = "DATA"
 
-        data = (num & 0x07f8) >> 3
+        data = (num & 0x0ff0) >> 4
 
         if is_command:
             command_name = self.get_command_name(data)
