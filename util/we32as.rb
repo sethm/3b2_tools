@@ -85,10 +85,6 @@
 require 'json'
 require 'optparse'
 
-#
-# Monkey patch Numeric with some convenient 2's complement
-# features.
-#
 class Encoder
   @@registers = {
     "%r0" => 0,
@@ -163,10 +159,9 @@ class Encoder
     SUBW3: 0xfc, SUBH3: 0xfe, SUBB: 0xff
   }
 
-  attr_accessor :pc
-
-  def initialize
-    @pc = 0x2000000
+  def initialize(initial_pc, output_handler)
+    @initial_pc = initial_pc
+    @output_handler = output_handler
   end
 
   # Tokenize an instruction and return an array containing 0 to n
@@ -235,10 +230,12 @@ class Encoder
   end
 
   def displacement_value(operand_token)
-    md = /^\*?([^\(]+)\(/.match(operand_token)
+    md = /^\*?(-?[^\(]+)\(/.match(operand_token)
 
     if md
       parse_number(md[1])
+    else
+      return 0
     end
   end
 
@@ -454,10 +451,82 @@ class Encoder
     return bytes
   end
 
-  def escape(str)
-    str.gsub(/\%/, "\\%")
+  def consume_file(file)
+    test_count = 0
+
+    json_hash = JSON.parse(File.open(file).read)
+
+    @output_handler.print_file_header()
+
+    json_hash.each do |test_name, test_block|
+
+      @pc = @initial_pc
+
+      @output_handler.print_test_header(test_count, test_name)
+
+      test_count += 1
+
+      @output_handler.print_test_setup(@pc, test_block)
+
+      if test_block["body"]
+        test_block["body"].each do |instruction|
+          bytes = to_bytes(instruction)
+          @output_handler.print_instruction(bytes, instruction, @pc)
+        end
+      end
+
+      @output_handler.print_test_teardown(@pc, test_block["body"].size)
+
+      @output_handler.print_execute(test_block)
+
+      @output_handler.print_asserts(test_block)
+    end
+
+    @output_handler.print_file_footer()
+  end
+end
+
+class BlitOutputHandler
+  def print_file_header
   end
 
+  def print_test_header(test_count, test_name)
+    puts "#[test]"
+    puts "fn %s() {" % test_name
+  end
+
+  def print_test_setup(pc, test_block)
+    puts "    let program = ["
+  end
+
+  def print_instruction(bytes, instruction, pc)
+    print "        "
+    print(bytes.map {|b| "0x%02x," % b }.join(" "))
+    puts " // %s" % instruction
+  end
+
+  def print_test_teardown(pc, test_count)
+    puts "    ];"
+    puts "    do_with_program(&program, |cpu, mut bus| {"
+    test_count.times do
+      puts "        cpu.step(&mut bus);"
+      puts "        assert_eq!(0, 0);"
+    end
+    puts "    });"
+    puts "}"
+  end
+
+  def print_execute(test_block)
+  end
+
+  def print_asserts(test_block)
+  end
+
+  def print_file_footer
+  end
+end
+
+class SimhOutputHandler
   def print_file_header
     puts <<EOF
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -473,6 +542,59 @@ set on
 on afail goto failure
 
 EOF
+  end
+
+  def print_test_header(test_count, test_name)
+    puts ";;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;"
+    puts "ECHO TEST #{test_count}: #{test_name}..."
+    puts
+  end
+
+  def print_test_setup(pc, test_block)
+    puts "; SETUP"
+
+    puts "d pc %04x" % [pc]
+    puts
+
+    if test_block["setup"]
+      test_block["setup"].each do |key, val|
+          puts "d #{key} #{val}"
+      end
+      puts
+    end
+  end
+
+  def print_test_teardown(pc, test_count)
+  end
+
+  def print_instruction(bytes, instruction, pc)
+    if !bytes
+      raise "Unable to assemble instruction: #{instruction}"
+    end
+
+    puts "; #{instruction}"
+
+    bytes.each do |b|
+      puts "dep -b %04x %02x" % [pc, b]
+      pc += 1
+    end
+  end
+
+  def print_execute(test_block)
+    puts
+    puts "; Execute the instruction(s)"
+    puts "STEP %d" % test_block["body"].size
+    puts
+  end
+
+  def print_asserts(test_block)
+    if test_block["asserts"]
+      puts "; ASSERTS"
+      test_block["asserts"].each do |key, val|
+        puts "ASSERT #{key}=#{val}"
+      end
+      puts
+    end
   end
 
   def print_file_footer
@@ -493,68 +615,6 @@ show history=1
 EOF
   end
 
-  def consume_file(file)
-    test_count = 0
-    
-    json_hash = JSON.parse(File.open(file).read)
-
-    print_file_header()
-
-    json_hash.each do |test_name, test_block|
-
-      @pc = 0x2000000
-
-      puts ";;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;"
-      puts "ECHO TEST #{test_count}: #{test_name}..."
-      puts
-
-      test_count += 1
-
-      puts "; SETUP"
-      
-      puts "d pc %04x" % [@pc]
-      puts
-      
-      if test_block["setup"]
-        test_block["setup"].each do |key, val|
-          puts "d #{key} #{val}"
-        end
-        puts
-      end
-
-      if test_block["body"]
-        test_block["body"].each do |instruction|
-          bytes = to_bytes(instruction)
-
-          if !bytes
-            raise "Unable to assemble instruction: #{instruction}"
-          end
-
-          puts "; #{instruction}"
-
-          bytes.each do |b|
-            puts "dep -b %04x %02x" % [@pc, b]
-            @pc += 1
-          end
-        end
-        puts
-      end
-
-      puts "; Execute the instruction(s)"
-      puts "STEP %d" % test_block["body"].size
-      puts
-
-      if test_block["asserts"]
-        puts "; ASSERTS"
-        test_block["asserts"].each do |key, val|
-          puts "ASSERT #{key}=#{val}"
-        end
-        puts
-      end
-    end
-
-    print_file_footer()
-  end
 end
 
 
@@ -576,7 +636,7 @@ if __FILE__ == $0
 
 
   # Start reading in from the input
-  encoder = Encoder.new
+  encoder = Encoder.new(0x2000, BlitOutputHandler.new)
 
   infile = ARGV[0]
 
