@@ -48,6 +48,7 @@ fn disassemble(buf: &[u8]) {
 
             for section in metadata.sections {
                 let header: SectionHeader = section.header;
+                let sec_name = name(&header.name).unwrap();
 
                 println!();
                 println!("Section Header:");
@@ -79,7 +80,12 @@ fn disassemble(buf: &[u8]) {
                 if section.data.len() > 0 {
                     println!("    Section Data");
 
+                    // Make a cute little array for our read data.
+                    let mut row_bytes: [u8; 16] = [0; 16];
+
                     for (i, b) in section.data.iter().enumerate() {
+                        row_bytes[i % 16] = *b;
+
                         if i % 16 == 0 {
                             let vaddr = header.vaddr + i as u32;
                             print!("        {:08x}:   ", vaddr);
@@ -91,8 +97,48 @@ fn disassemble(buf: &[u8]) {
                             print!("  ");
                         }
 
+                        // If we need to end a line, it's time to print the
+                        // human-readable summary.
+
                         if (i + 1) % 16 == 0 || i == (header.size - 1) as usize {
-                            println!();
+
+                            // How many empty characters do we need to pad out
+                            // before the summary?
+                            let spaces = if i == (header.size - 1) as usize {
+                                16 - (header.size % 16)
+                            } else {
+                                0
+                            };
+
+                            if spaces > 0 {
+                                eprintln!("*** section {} line end. spaces = {}",
+                                          sec_name, spaces);
+                            }
+
+                            for _ in 0..spaces {
+                                print!("   ");
+                            }
+
+                            if spaces > 8 {
+                                print!("  ");
+                            }
+
+                            print!("  | ");
+
+                            for (x, c) in row_bytes.iter().enumerate() {
+                                if x < (16 - spaces) as usize {
+                                    let printable = if *c >= 0x20 && *c < 0x7f {
+                                        *c as char
+                                    } else {
+                                        b'.' as char
+                                    };
+                                    print!("{}", printable);
+                                } else {
+                                    print!(" ");
+                                }
+                            }
+
+                            println!(" |");
                         }
                     }
                 }
