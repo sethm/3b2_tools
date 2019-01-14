@@ -2,10 +2,14 @@
 /// WE32000 COFF File Parsing and Utilities
 ///
 
+use std::str;
+use std::str::Utf8Error;
 use std::fmt;
 use std::io::Cursor;
 use std::io;
 use std::io::{Read, Seek, SeekFrom};
+use std::marker::PhantomData;
+use crate::errors::{CoffError, Result};
 
 use chrono::prelude::*;
 use chrono::TimeZone;
@@ -18,8 +22,11 @@ const MAGIC_WE32K: u16 = 0x170;
 // WE32000 with transfer vector
 const MAGIC_WE32K_TV: u16 = 0x171;
 
-// The optional header (if present) is 28 bytes long
-const OPT_HEADER_SIZE: u16 = 0x1c;
+// Size of the file header
+const FILE_HEADER_SIZE: u16 = 20;
+
+// Length of old COFF version symbol names
+const SYM_NAME_LEN: usize = 8;
 
 bitflags! {
     pub struct Flags: u16 {
@@ -50,8 +57,6 @@ bitflags! {
     }
 }
 
-
-
 pub struct FileHeader {
     pub magic: u16,
     pub section_count: u16,
@@ -60,6 +65,27 @@ pub struct FileHeader {
     pub symbol_count: u32,
     pub opt_header: u16,
     pub flags: Flags,
+}
+
+impl FileHeader {
+
+    ///
+    /// Read a FileHeader from the current cursor position.
+    ///
+
+    pub fn read(cursor: &mut Cursor<&[u8]>) -> io::Result<Self> {
+        let header = FileHeader {
+            magic: cursor.read_u16::<BigEndian>()?,
+            section_count: cursor.read_u16::<BigEndian>()?,
+            timestamp: cursor.read_u32::<BigEndian>()?,
+            symbols_pointer: cursor.read_u32::<BigEndian>()?,
+            symbol_count: cursor.read_u32::<BigEndian>()?,
+            opt_header: cursor.read_u16::<BigEndian>()?,
+            flags: Flags::from_bits_truncate(cursor.read_u16::<BigEndian>()?),
+        };
+
+        Ok(header)
+    }
 }
 
 impl fmt::Debug for FileHeader {
@@ -90,7 +116,6 @@ impl fmt::Debug for FileHeader {
             desc.push_str(", with relocation info");
         }
 
-
         write!(f, "{}", desc)
     }
 }
@@ -107,6 +132,23 @@ pub struct OptionalHeader {
     pub data_start: u32,
 }
 
+impl OptionalHeader {
+    pub fn read(cursor: &mut Cursor<&[u8]>) -> io::Result<Self> {
+        let header = OptionalHeader {
+            magic: cursor.read_u16::<BigEndian>()?,
+            version_stamp: cursor.read_u16::<BigEndian>()?,
+            text_size: cursor.read_u32::<BigEndian>()?,
+            dsize: cursor.read_u32::<BigEndian>()?,
+            bsize: cursor.read_u32::<BigEndian>()?,
+            entry_point: cursor.read_u32::<BigEndian>()?,
+            text_start: cursor.read_u32::<BigEndian>()?,
+            data_start: cursor.read_u32::<BigEndian>()?
+        };
+
+        Ok(header)
+    }
+}
+
 pub struct SectionHeader {
     pub name: [u8; 8],
     pub paddr: u32,
@@ -120,92 +162,145 @@ pub struct SectionHeader {
     pub flags: u32,
 }
 
+impl SectionHeader {
+    pub fn read(cursor: &mut Cursor<&[u8]>) -> io::Result<Self> {
+        let mut name: [u8; 8] = [0; 8];
+        cursor.read_exact(&mut name)?;
+
+        let header = SectionHeader {
+            name: name,
+            paddr: cursor.read_u32::<BigEndian>()?,
+            vaddr: cursor.read_u32::<BigEndian>()?,
+            size: cursor.read_u32::<BigEndian>()?,
+            scnptr: cursor.read_u32::<BigEndian>()?,
+            relptr: cursor.read_u32::<BigEndian>()?,
+            lnnoptr: cursor.read_u32::<BigEndian>()?,
+            nreloc: cursor.read_u16::<BigEndian>()?,
+            nlnno: cursor.read_u16::<BigEndian>()?,
+            flags: cursor.read_u32::<BigEndian>()?,
+        };
+
+        Ok(header)
+    }
+}
+
+/// Representation of a Relocation Table Entry
 pub struct RelocationEntry {
     pub vaddr: u32,
     pub symndx: u32,
     pub rtype: u16,
 }
 
-pub struct Section {
-    pub header: SectionHeader,
-    pub relocation_entries: Vec<RelocationEntry>,
+/// Representation of a Symbol Table Entry
+pub struct SymbolEntry {
+    pub n_name: [u8; SYM_NAME_LEN],
+    pub n_zeroes: u32,
+    pub n_offset: u32,
+    pub n_value: u32,
+    pub n_scnum: i16,
+    pub n_type: u16,
+    pub n_sclass: u8,
+    pub n_numaux: u8,
+    pub is_aux: bool,
 }
 
-pub struct MetaData {
+pub struct StringTable<'s> {
+    pub data: Vec<u8>,
+    pub data_size: u32,
+    pub string_count: u32,
+    phantom: PhantomData<&'s str>,
+}
+
+impl<'s> StringTable<'s> {
+    pub fn read(cursor: &mut Cursor<&[u8]>) -> io::Result<Self> {
+        let mut data: Vec<u8> = vec!();
+        // The first four bytes of data are ALWAYS zeroed.
+        let mut pad: Vec<u8> = vec!(0, 0, 0, 0);
+        data.append(&mut pad);
+        // ... and therefore, the index is always initialized to 4.
+        let mut index: u32 = 4;
+        let mut string_count: u32 = 0;
+        let data_size = cursor.read_u32::<BigEndian>()?;
+
+        while index < data_size {
+            let c = cursor.read_u8()?;
+            data.push(c);
+            if c == 0 {
+                string_count += 1;
+            }
+            index += 1;
+        }
+
+        let table = StringTable {
+            data,
+            data_size,
+            string_count,
+            phantom: PhantomData,
+        };
+
+        Ok(table)
+    }
+
+    pub fn string_at(&'s self, index: u32) -> std::result::Result<&'s str, Utf8Error> {
+        let start = index as usize;
+
+        // Index into the vector at the appropriate location, and then
+        // find the first nul.
+        let nul = self.data[start.. ].iter()
+            .position( |&c| c == b'\0')
+            .unwrap_or(self.data.len() - start);
+
+        let end = start + nul;
+
+        let s = &self.data[start..end];
+
+        str::from_utf8(&s)
+    }
+}
+
+pub struct Section {
+    pub header: SectionHeader,
+    pub relocations: Vec<RelocationEntry>,
+    pub data: Vec<u8>,
+}
+
+pub struct MetaData<'s> {
     pub header: FileHeader,
     pub timestamp: DateTime<Utc>,
     pub opt_header: Option<OptionalHeader>,
     pub sections: Vec<Section>,
+    pub symbols: Vec<SymbolEntry>,
+    pub strings: StringTable<'s>,
 }
 
-impl MetaData {
-    pub fn read(cursor: &mut Cursor<&[u8]>) -> io::Result<MetaData> {
-        // FIRST PASS: Pull out File Header, Optional Header (if any),
-        // and Section Headers
+impl<'s> MetaData<'s> {
 
-        cursor.seek(SeekFrom::Start(0))?;
+    ///
+    /// Read in and destructure a WE32100 COFF file.
+    ///
 
-        let header = FileHeader {
-            magic: cursor.read_u16::<BigEndian>()?,
-            section_count: cursor.read_u16::<BigEndian>()?,
-            timestamp: cursor.read_u32::<BigEndian>()?,
-            symbols_pointer: cursor.read_u32::<BigEndian>()?,
-            symbol_count: cursor.read_u32::<BigEndian>()?,
-            opt_header: cursor.read_u16::<BigEndian>()?,
-            flags: Flags::from_bits_truncate(cursor.read_u16::<BigEndian>()?),
-        };
+    fn bad_metadata(header: &FileHeader) -> bool {
+        !(header.magic == MAGIC_WE32K || header.magic == MAGIC_WE32K_TV)
+    }
 
-        let opt_header = if header.opt_header == OPT_HEADER_SIZE {
-            Some(
-                OptionalHeader {
-                    magic: cursor.read_u16::<BigEndian>()?,
-                    version_stamp: cursor.read_u16::<BigEndian>()?,
-                    text_size: cursor.read_u32::<BigEndian>()?,
-                    dsize: cursor.read_u32::<BigEndian>()?,
-                    bsize: cursor.read_u32::<BigEndian>()?,
-                    entry_point: cursor.read_u32::<BigEndian>()?,
-                    text_start: cursor.read_u32::<BigEndian>()?,
-                    data_start: cursor.read_u32::<BigEndian>()?
-                }
-            )
-        } else {
-            None
-        };
-
+    fn read_sections(file_header: &FileHeader, cursor: &mut Cursor<&[u8]>) -> io::Result<Vec<Section>> {
         let mut section_headers: Vec<SectionHeader> = vec!();
 
-        for _ in 0..header.section_count {
-            let mut name: [u8; 8] = [0; 8];
-            cursor.read_exact(&mut name)?;
-
-            let sec_header = SectionHeader {
-                name: name,
-                paddr: cursor.read_u32::<BigEndian>()?,
-                vaddr: cursor.read_u32::<BigEndian>()?,
-                size: cursor.read_u32::<BigEndian>()?,
-                scnptr: cursor.read_u32::<BigEndian>()?,
-                relptr: cursor.read_u32::<BigEndian>()?,
-                lnnoptr: cursor.read_u32::<BigEndian>()?,
-                nreloc: cursor.read_u16::<BigEndian>()?,
-                nlnno: cursor.read_u16::<BigEndian>()?,
-                flags: cursor.read_u32::<BigEndian>()?,
-            };
-
-            section_headers.push(sec_header);
+        // Read the section headers
+        for _ in 0..file_header.section_count {
+            section_headers.push(SectionHeader::read(cursor)?);
         }
 
-        // SECOND PASS: Now that we have decoded the section headers,
-        // let's decode the section relocation tables.
-
+        // Build up the section structures
         let mut sections: Vec<Section> = vec!();
 
         for header in section_headers {
-            let mut relocation_entries: Vec<RelocationEntry> = vec!();
+            let mut relocations: Vec<RelocationEntry> = vec!();
+            let mut data: Vec<u8> = vec!();
 
+            // Get relocation information
             if header.nreloc > 0 {
-                let offset = header.relptr;
-
-                cursor.seek(SeekFrom::Start(u64::from(offset)))?;
+                cursor.seek(SeekFrom::Start(u64::from(header.relptr)))?;
 
                 for _ in 0..header.nreloc {
                     let entry = RelocationEntry {
@@ -213,21 +308,142 @@ impl MetaData {
                         symndx: cursor.read_u32::<BigEndian>()?,
                         rtype: cursor.read_u16::<BigEndian>()?,
                     };
-
-                    relocation_entries.push(entry);
+                    relocations.push(entry);
                 }
             }
 
+            // Get data
+            if header.size > 0 {
+                cursor.seek(SeekFrom::Start(u64::from(header.scnptr)))?;
+
+                for _ in 0..header.size {
+                    data.push(cursor.read_u8()?);
+                }
+            }
+
+            // Done with this section.
             let section = Section {
                 header,
-                relocation_entries,
+                relocations,
+                data,
             };
 
             sections.push(section);
         }
 
-        // FINAL TOUCHUPS
+        Ok(sections)
+    }
 
+    fn read_symbol_table(header: &FileHeader, cursor: &mut Cursor<&[u8]>) -> io::Result<Vec<SymbolEntry>> {
+        let mut symbols: Vec<SymbolEntry> = vec!();
+
+        if header.symbol_count > 0 {
+            cursor.seek(SeekFrom::Start(u64::from(header.symbols_pointer)))?;
+
+            // Keep track of which symbols are aux symbols, and which
+            // are not, by tagging them with metadata.
+            let mut is_aux = false;
+            let mut aux_index: u8 = 0;
+
+            for _ in 0..header.symbol_count {
+                let mut name: [u8; SYM_NAME_LEN] = [0; SYM_NAME_LEN];
+
+                cursor.read_exact(&mut name)?;
+
+                let mut zeroes_array: [u8; 4] = [0; 4];
+                let mut offset_array: [u8; 4] = [0; 4];
+
+                zeroes_array.clone_from_slice(&name[0..4]);
+                offset_array.clone_from_slice(&name[4..]);
+
+                let symbol_entry = SymbolEntry {
+                    n_name: name,
+                    n_zeroes: unsafe { std::mem::transmute::<[u8; 4], u32>(zeroes_array) }.to_be().into(),
+                    n_offset: unsafe { std::mem::transmute::<[u8; 4], u32>(offset_array) }.to_be().into(),
+                    n_value: cursor.read_u32::<BigEndian>()?,
+                    n_scnum: cursor.read_i16::<BigEndian>()?,
+                    n_type: cursor.read_u16::<BigEndian>()?,
+                    n_sclass: cursor.read_u8()?,
+                    n_numaux: cursor.read_u8()?,
+                    is_aux: is_aux,
+                };
+
+                // If we just read a numaux > 0, then the next symbol
+                // we read will be an aux symbol, down to the last
+                // one.
+
+                if is_aux {
+                    aux_index -= 1;
+                    if aux_index == 0 {
+                        is_aux = false;
+                    }
+                }
+
+                if symbol_entry.n_numaux > 0 {
+                    is_aux = true;
+                    aux_index = symbol_entry.n_numaux;
+                }
+
+                symbols.push(symbol_entry);
+            }
+        }
+
+        Ok(symbols)
+    }
+
+    pub fn read(buf: &[u8]) -> Result<Self> {
+        let mut cursor = Cursor::new(buf);
+
+        // Determine if we're parsing a linked executable
+        // or an object file.
+
+        // Read the file header.
+        let header = match FileHeader::read(&mut cursor) {
+            Ok(h) => {
+                if MetaData::bad_metadata(&h) {
+                    return Err(CoffError::BadFileHeader)
+                } else {
+                    h
+                }
+            },
+            Err(_) => return Err(CoffError::BadFileHeader)
+        };
+
+        // If an optional header is indicated in the file header, read
+        // it.
+        let opt_header = if header.opt_header > 0 {
+            match OptionalHeader::read(&mut cursor) {
+                Ok(h) => Some(h),
+                Err(_) => return Err(CoffError::BadOptionalHeader)
+            }
+        } else {
+            None
+        };
+
+        // Now we have to seek to the sections area.
+        if let Err(_) = cursor.seek(SeekFrom::Start(u64::from(FILE_HEADER_SIZE + header.opt_header))) {
+            return Err(CoffError::BadSections)
+        }
+
+        // Read sections
+        let sections = match MetaData::read_sections(&header, &mut cursor) {
+            Ok(s) => s,
+            Err(_) => return Err(CoffError::BadSections)
+        };
+
+        // Load symbols
+        let symbols = match MetaData::read_symbol_table(&header, &mut cursor) {
+            Ok(s) => s,
+            Err(_) => return Err(CoffError::BadSymbols)
+        };
+
+        // The cursor is now at the correct position to read string entries.
+        let strings = match StringTable::read(&mut cursor) {
+            Ok(s) => s,
+            Err(_) => return Err(CoffError::BadStrings)
+        };
+
+        // Finally, destructure the timestamp
         let timestamp = Utc.timestamp(i64::from(header.timestamp), 0);
 
         let metadata = MetaData {
@@ -235,6 +451,8 @@ impl MetaData {
             timestamp,
             opt_header,
             sections,
+            symbols,
+            strings,
         };
 
         Ok(metadata)

@@ -1,0 +1,6 @@
+[workspace]
+
+members = [
+    "we32dis",
+    "we32as",
+]
