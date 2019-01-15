@@ -1,7 +1,27 @@
 use std::error;
 use std::fmt;
 
-pub type Result<T> = std::result::Result<T, CoffError>;
+pub type ReadResult<T> = std::result::Result<T, CoffError>;
+
+#[derive(Debug, Clone)]
+pub struct OffsetError;
+
+impl fmt::Display for OffsetError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "bad offset")
+    }
+}
+
+impl error::Error for OffsetError {
+    fn description(&self) -> &str {
+        "bad offset"
+    }
+
+    fn cause(&self) -> Option<&error::Error> {
+        None
+    }
+}
+
 
 #[derive(Debug, Clone)]
 pub enum CoffError {
