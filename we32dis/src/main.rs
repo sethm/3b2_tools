@@ -10,32 +10,47 @@ use std::vec::Vec;
 use clap::{Arg, App};
 
 use crate::coff::FileContainer;
+use crate::decode::Decoder;
+use std::io::Cursor;
 
 mod errors;
 mod coff;
+mod decode;
 
 fn disassemble(buf: &[u8]) {
     match FileContainer::read(buf) {
         Ok(container) => {
             println!("{:?}", container.header);
+//
+//            if let Some(opt_header) = &container.opt_header {
+//                println!("{:?}", opt_header);
+//            }
+//
+//            for (sec_num, section) in container.sections.iter().enumerate() {
+//                println!("{:?}", section.header);
+//
+//                if let Err(e) = container.dump_relocation_table(sec_num) {
+//                    println!("Error: Couldn't dump relocation table: {:?}", e);
+//                }
+//
+//                if let Err(e) = container.dump_section_data(sec_num) {
+//                    println!("Error: Couldn't dump section data: {:?}", e);
+//                }
+//            }
+//            container.dump_symbol_table();
+//            container.dump_strings_table();
 
-            if let Some(opt_header) = &container.opt_header {
-                println!("{:?}", opt_header);
-            }
 
-            for (sec_num, section) in container.sections.iter().enumerate() {
-                println!("{:?}", section.header);
+            // OK, now let's try to decode some shit.
+            if let Some(data) = container.section_data(0) {
+                println!("\nSection: .text\n");
+                let mut decoder = Decoder::new();
+                let mut cursor: Cursor<&[u8]> = Cursor::new(data);
 
-                if let Err(e) = container.dump_relocation_table(sec_num) {
-                    println!("Error: Couldn't dump relocation table: {:?}", e);
+                while let Ok(()) = decoder.decode_instruction(&mut cursor) {
+                    println!("{}", decoder.ir);
                 }
-
-                if let Err(e) = container.dump_section_data(sec_num) {
-                    println!("Error: Couldn't dump section data: {:?}", e);
-                }
             }
-            container.dump_symbol_table();
-            container.dump_strings_table();
         },
         Err(e) => {
             println!("Could not parse file: {}", e);

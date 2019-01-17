@@ -7,7 +7,6 @@ use std::fmt;
 use std::io::Cursor;
 use std::io;
 use std::io::{Read, Seek, SeekFrom};
-use std::marker::PhantomData;
 use std::str;
 
 use crate::errors::{CoffError, ReadResult, OffsetError};
@@ -16,6 +15,7 @@ use chrono::prelude::*;
 use chrono::TimeZone;
 
 use byteorder::{BigEndian, ReadBytesExt};
+use std::collections::HashMap;
 
 // WE32000 without transfer vector
 const MAGIC_WE32K: u16 = 0x170;
@@ -36,29 +36,19 @@ const SYM_NAME_LEN: usize = 8;
 bitflags! {
     pub struct FileHeaderFlags: u16 {
         // Relocation info stripped from file
-        const REL_STRIPPED = 0x0001;
+        const F_RELFLG = 0x0001;
         // File is executable (i.e. no unresolved external references)
-        const EXECUTABLE = 0x0002;
+        const F_EXEC = 0x0002;
         // Line numbers stripped from file
-        const LINE_NUM_STRIPPED = 0x0004;
+        const F_LNNO = 0x0004;
         // Local symbols stripped from file
-        const LSYM_STRIPPED = 0x0010;
-        // This is a minimal object file (".m") output of fextract
-        const MINMAL_OBJECT = 0x0020;
-        // This is a fully bound update file, output of ogen
-        const UPDATE_FILE = 0x0040;
-        // This file has had its bytes swabbed (in names)
-        const SWABBED = 0x0100;
-        // This file has the byte ordering of an AR16WR (e.g. 11/70) machine
-        const BYTES_AR16WR = 0x0200;
-        // This file has the byte ordering of an AR32WR machine (e.g. vax)
-        const BYTES_AR32WR = 0x0400;
+        const F_LSYMS = 0x0008;
         // This file has the byte ordering of an AR32W machine (e.g. 3b, maxi)
-        const BYTES_AR32W = 0x1000;
-        // File contains "patch" list in optional header
-        const PATCH_LIST = 0x2000;
-        // (minimal file only) no decision functions for replaced functions
-        const NO_DECISION_FUNCTIONS = 0x2000;
+        const F_AR32W = 0x0200;
+        // WE32100 required
+        const F_BM32B = 0x2000;
+        // MAU required
+        const F_BM32MAU = 0x4000;
     }
 }
 
@@ -106,6 +96,22 @@ impl FileHeader {
 
         Ok(header)
     }
+
+    pub fn executable(&self) -> bool {
+        self.flags.contains(FileHeaderFlags::F_EXEC)
+    }
+
+    pub fn local_symbols_stripped(&self) -> bool {
+        self.flags.contains(FileHeaderFlags::F_LSYMS)
+    }
+
+    pub fn is_32100_required(&self) -> bool {
+        self.flags.contains(FileHeaderFlags::F_BM32B)
+    }
+
+    pub fn mau_required(&self) -> bool {
+        self.flags.contains(FileHeaderFlags::F_BM32MAU)
+    }
 }
 
 impl fmt::Debug for FileHeader {
@@ -113,27 +119,26 @@ impl fmt::Debug for FileHeader {
         writeln!(f, "COFF File Header:")?;
 
         let magic = match self.magic {
-            MAGIC_WE32K => "WE32000 COFF",
-            MAGIC_WE32K_TV => "WE32000 COFF (TV)",
+            MAGIC_WE32K | MAGIC_WE32K_TV => "WE32000",
             _ => "Unknown"
         };
 
-        write!(f, "    {}", magic)?;
+        write!(f, "{}", magic)?;
 
-        if self.flags.contains(FileHeaderFlags::EXECUTABLE) {
+        if self.executable() {
             write!(f, " executable")?;
         }
 
-        if self.flags.contains(FileHeaderFlags::LSYM_STRIPPED) {
-            write!(f, ", symbols stripped")?;
-        } else {
-            write!(f, ", with symbols")?;
+        if !self.local_symbols_stripped() {
+            write!(f, " not stripped")?;
         }
 
-        if self.flags.contains(FileHeaderFlags::REL_STRIPPED) {
-            write!(f, ", relocation info stripped")?;
-        } else {
-            write!(f, ", with relocation info")?;
+        if self.is_32100_required() {
+            write!(f, ", 32100 required")?;
+        }
+
+        if self.mau_required() {
+            write!(f, ", MAU hardware required")?;
         }
 
         writeln!(f, ".")?;
@@ -210,7 +215,7 @@ impl SectionHeader {
         cursor.read_exact(&mut name)?;
 
         let header = SectionHeader {
-            name: name,
+            name,
             paddr: cursor.read_u32::<BigEndian>()?,
             vaddr: cursor.read_u32::<BigEndian>()?,
             size: cursor.read_u32::<BigEndian>()?,
@@ -251,8 +256,81 @@ pub struct RelocationEntry {
     pub rtype: u16,
 }
 
+///// Applicaple only to primary symbols.
+//pub enum SymbolType {
+//    None,
+//    Pointer,
+//    Function,
+//    Array,
+//}
+
+#[derive(Copy, Clone)]
+pub enum StorageClass {
+    EndOfFunction,
+    Null,
+    Auto,
+    ExternalSym,
+    Static,
+    Register,
+    ExternalDef,
+    Label,
+    UndefinedLabel,
+    MemberOfStruct,
+    FunctionArg,
+    StructureTag,
+    MemberOfUnion,
+    UnionTag,
+    TypeDefinition,
+    UninitializedStatic,
+    EnumerationTag,
+    MemberOfEnumeration,
+    RegisterParameter,
+    BitField,
+    BeginEndBlock,
+    BeginEndFunc,
+    EndOfStruct,
+    Filename,
+    Line,
+    Alias,
+    Hidden,
+}
+
+impl fmt::Debug for StorageClass {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            StorageClass::EndOfFunction => write!(f, "end of function"),
+            StorageClass::Null => write!(f, "null"),
+            StorageClass::Auto => write!(f, "automatic variable"),
+            StorageClass::ExternalSym => write!(f, "external symbol"),
+            StorageClass::Static => write!(f, "static"),
+            StorageClass::Register => write!(f, "register variable"),
+            StorageClass::ExternalDef => write!(f, "external definition"),
+            StorageClass::Label => write!(f, "label"),
+            StorageClass::UndefinedLabel => write!(f, "undefined label"),
+            StorageClass::MemberOfStruct => write!(f, "member of structure"),
+            StorageClass::FunctionArg => write!(f, "function argument"),
+            StorageClass::StructureTag => write!(f, "structure tag"),
+            StorageClass::MemberOfUnion => write!(f, "member of union"),
+            StorageClass::UnionTag => write!(f, "union tag"),
+            StorageClass::TypeDefinition => write!(f, "type definition"),
+            StorageClass::UninitializedStatic => write!(f, "uninitialized static"),
+            StorageClass::EnumerationTag => write!(f, "enumeration tag"),
+            StorageClass::MemberOfEnumeration => write!(f, "member of enumeration"),
+            StorageClass::RegisterParameter => write!(f, "register parameter"),
+            StorageClass::BitField => write!(f, "bit field"),
+            StorageClass::BeginEndBlock => write!(f, "beginning and end of block"),
+            StorageClass::BeginEndFunc => write!(f, "beginning and end of function"),
+            StorageClass::EndOfStruct => write!(f, "end of structure"),
+            StorageClass::Filename => write!(f, "filename"),
+            StorageClass::Line => write!(f, "line"),
+            StorageClass::Alias => write!(f, "duplicated tag"),
+            StorageClass::Hidden => write!(f, "hidden"),
+        }
+    }
+}
+
 /// Representation of a Symbol Table Entry
-pub enum SymbolTableEntry {
+pub enum Symbol {
     Primary {
         // Primary Symbol Data
         //
@@ -278,8 +356,8 @@ pub enum SymbolTableEntry {
         n_value: u32,
         n_scnum: i16,
         n_type: u16,
-        n_sclass: u8,
         n_numaux: u8,
+        storage_class: StorageClass,
     },
     Auxiliary {
         // Auxiliary Symbol Data
@@ -303,6 +381,7 @@ pub enum SymbolTableEntry {
         //   2 bytes: x_tvndx
         //   ------------------
         //   18 bytes total
+        x_fname: Option<String>,
         x_tagndx: u32,
         x_lnno: u16,        // Decl. line number
         x_size: u16,        // Str, union, array size
@@ -314,16 +393,117 @@ pub enum SymbolTableEntry {
     }
 }
 
-
-pub struct StringTable<'s> {
-    pub data: Vec<u8>,
-    pub data_size: u32,
-    pub string_count: u32,
-    pub strings: Vec<(u32, String)>,
-    phantom: PhantomData<&'s str>,
+pub struct SymbolTableEntry {
+    symbol: Symbol,
 }
 
-impl<'s> StringTable<'s> {
+impl SymbolTableEntry {
+    pub fn read_symbol(cursor: &mut Cursor<&[u8]>, is_aux: bool, parent_class: &StorageClass) -> io::Result<Symbol> {
+        let mut raw_data: [u8; 18] = [0; 18];
+
+        // Consume 18 bytes.
+        cursor.read_exact(&mut raw_data)?;
+
+        let symbol = match is_aux {
+            true => {
+                let mut x_dimen: [u16; 4] = Default::default();
+
+                let x_fname = match parent_class {
+                    StorageClass::Filename => {
+                        Some(buf_to_str(&raw_data[0..14]).unwrap_or("???").to_owned())
+                    },
+                    _ => None
+                };
+
+                let x_tagndx = (&raw_data[0..4]).read_u32::<BigEndian>()?;
+                let x_lnno = (&raw_data[4..6]).read_u16::<BigEndian>()?;
+                let x_size = (&raw_data[6..8]).read_u16::<BigEndian>()?;
+                let x_fsize = (&raw_data[4..8]).read_u32::<BigEndian>()?;
+                let x_lnnoptr = (&raw_data[8..12]).read_u32::<BigEndian>()?;
+                let x_endndx = (&raw_data[12..16]).read_u32::<BigEndian>()?;
+                x_dimen[0] = (&raw_data[8..10]).read_u16::<BigEndian>()?;
+                x_dimen[1] = (&raw_data[10..12]).read_u16::<BigEndian>()?;
+                x_dimen[2] = (&raw_data[12..14]).read_u16::<BigEndian>()?;
+                x_dimen[3] = (&raw_data[14..16]).read_u16::<BigEndian>()?;
+                let x_tvndx = (&raw_data[16..18]).read_u16::<BigEndian>()?;
+
+                Symbol::Auxiliary {
+                    x_fname,
+                    x_tagndx,
+                    x_lnno,
+                    x_size,
+                    x_fsize,
+                    x_lnnoptr,
+                    x_endndx,
+                    x_dimen,
+                    x_tvndx,
+                }
+            },
+            false => {
+                let mut n_name: [u8; SYM_NAME_LEN] = Default::default();
+                n_name.copy_from_slice(&raw_data[0..8]);
+                let n_zeroes = (&raw_data[0..4]).read_u32::<BigEndian>()?;
+                let n_offset = (&raw_data[4..8]).read_u32::<BigEndian>()?;
+                let n_value = (&raw_data[8..12]).read_u32::<BigEndian>()?;
+                let n_scnum = (&raw_data[12..14]).read_i16::<BigEndian>()?;
+                let n_type = (&raw_data[14..16]).read_u16::<BigEndian>()?;
+                let n_sclass = raw_data[16] as i8;
+                let n_numaux = raw_data[17];
+
+                let storage_class = match n_sclass {
+                    -1 => StorageClass::EndOfFunction,
+                    1 => StorageClass::Auto,
+                    2 => StorageClass::ExternalSym,
+                    3 => StorageClass::Static,
+                    4 => StorageClass::Register,
+                    5 => StorageClass::ExternalDef,
+                    6 => StorageClass::Label,
+                    7 => StorageClass::UndefinedLabel,
+                    8 => StorageClass::MemberOfStruct,
+                    9 => StorageClass::FunctionArg,
+                    10 => StorageClass::StructureTag,
+                    11 => StorageClass::MemberOfUnion,
+                    12 => StorageClass::UnionTag,
+                    13 => StorageClass::TypeDefinition,
+                    14 => StorageClass::UninitializedStatic,
+                    15 => StorageClass::EnumerationTag,
+                    16 => StorageClass::MemberOfEnumeration,
+                    17 => StorageClass::RegisterParameter,
+                    18 => StorageClass::BitField,
+                    100 => StorageClass::BeginEndBlock,
+                    101 => StorageClass::BeginEndFunc,
+                    102 => StorageClass::EndOfStruct,
+                    103 => StorageClass::Filename,
+                    104 => StorageClass::Line,
+                    105 => StorageClass::Alias,
+                    106 => StorageClass::Hidden,
+                    _ => StorageClass::Null,
+                };
+
+                Symbol::Primary {
+                    n_name,
+                    n_zeroes,
+                    n_offset,
+                    n_value,
+                    n_scnum,
+                    n_type,
+                    n_numaux,
+                    storage_class,
+                }
+            },
+        };
+
+        Ok(symbol)
+    }
+}
+
+pub struct StringTable {
+    pub data: Vec<u8>,
+    pub data_size: u32,
+    pub strings: HashMap<u32, String>,
+}
+
+impl StringTable {
     pub fn read(cursor: &mut Cursor<&[u8]>) -> io::Result<Self> {
         let mut data: Vec<u8> = vec!();
 
@@ -336,8 +516,9 @@ impl<'s> StringTable<'s> {
         let mut i: usize = 4;
 
         // Denormalize the strings as we parse them.
-        let mut strings: Vec<(u32, String)> = vec!();
+        let mut strings = HashMap::new();
 
+        // Get the size of data we're expected to read
         let data_size = cursor.read_u32::<BigEndian>()?;
 
         for j in 4..data_size as usize {
@@ -346,7 +527,7 @@ impl<'s> StringTable<'s> {
             if c == 0 {
                 // Push from the last start to here.
                 let s = buf_to_str(&data[i..j]).unwrap_or("???");
-                strings.push((i as u32, s.to_owned()));
+                strings.insert(i as u32, s.to_owned());
                 i = j + 1usize;
             }
         }
@@ -354,15 +535,13 @@ impl<'s> StringTable<'s> {
         let table = StringTable {
             data,
             data_size,
-            string_count: strings.len() as u32,
             strings,
-            phantom: PhantomData,
         };
 
         Ok(table)
     }
 
-    pub fn string_at(&'s self, index: u32) -> Result<&'s str, Utf8Error> {
+    pub fn string_at(&self, index: u32) -> Result<&str, Utf8Error> {
         let start = index as usize;
 
         // Index into the vector at the appropriate location, and then
@@ -385,16 +564,15 @@ pub struct Section {
     pub data: Vec<u8>,
 }
 
-pub struct FileContainer<'s> {
+pub struct FileContainer {
     pub header: FileHeader,
     pub opt_header: Option<OptionalHeader>,
     pub sections: Vec<Section>,
     pub symbols: Vec<SymbolTableEntry>,
-    pub strings: StringTable<'s>,
+    pub strings: StringTable,
 }
 
-impl<'s> FileContainer<'s> {
-
+impl FileContainer {
     ///
     /// Read in and destructure a WE32100 COFF file.
     ///
@@ -463,77 +641,39 @@ impl<'s> FileContainer<'s> {
             // Keep track of which symbols are aux symbols.
             let mut is_aux = false;
             let mut aux_index: u8 = 0;
-            let mut raw_data: [u8; 18] = [0; 18];
+            let mut sclass: StorageClass = StorageClass::Null;
 
             for _ in 0..header.symbol_count {
+                let symbol = SymbolTableEntry::read_symbol(cursor, is_aux, &sclass)?;
 
-                // Consume 18 bytes.
-                cursor.read_exact(&mut raw_data)?;
+                if is_aux {
+                    aux_index -= 1;
+                    if aux_index == 0 {
+                        is_aux = false;
+                    }
+                }
 
-                let symbol_table_entry = match is_aux {
-                    true => {
-                        aux_index -= 1;
-
-                        if aux_index == 0 {
-                            is_aux = false;
-                        }
-
-                        let mut x_dimen: [u16; 4] = Default::default();
-
-                        // let x_tagndx = read_u32(&raw_data[0..4]);
-                        let x_tagndx = (&raw_data[0..4]).read_u32::<BigEndian>()?;
-                        let x_lnno = (&raw_data[4..6]).read_u16::<BigEndian>()?;
-                        let x_size = (&raw_data[6..8]).read_u16::<BigEndian>()?;
-                        let x_fsize = (&raw_data[4..8]).read_u32::<BigEndian>()?;
-                        let x_lnnoptr = (&raw_data[8..12]).read_u32::<BigEndian>()?;
-                        let x_endndx = (&raw_data[12..16]).read_u32::<BigEndian>()?;
-                        x_dimen[0] = (&raw_data[8..10]).read_u16::<BigEndian>()?;
-                        x_dimen[1] = (&raw_data[10..12]).read_u16::<BigEndian>()?;
-                        x_dimen[2] = (&raw_data[12..14]).read_u16::<BigEndian>()?;
-                        x_dimen[3] = (&raw_data[14..16]).read_u16::<BigEndian>()?;
-                        let x_tvndx = (&raw_data[16..18]).read_u16::<BigEndian>()?;
-
-                        SymbolTableEntry::Auxiliary {
-                            x_tagndx,
-                            x_lnno,
-                            x_size,
-                            x_fsize,
-                            x_lnnoptr,
-                            x_endndx,
-                            x_dimen,
-                            x_tvndx,
-                        }
-                    },
-                    false => {
-                        let mut n_name: [u8; SYM_NAME_LEN] = Default::default();
-                        n_name.copy_from_slice(&raw_data[0..8]);
-                        let n_zeroes = (&raw_data[0..4]).read_u32::<BigEndian>()?;
-                        let n_offset = (&raw_data[4..8]).read_u32::<BigEndian>()?;
-                        let n_value = (&raw_data[8..12]).read_u32::<BigEndian>()?;
-                        let n_scnum = (&raw_data[12..14]).read_i16::<BigEndian>()?;
-                        let n_type = (&raw_data[14..16]).read_u16::<BigEndian>()?;
-                        let n_sclass = raw_data[16];
-                        let n_numaux = raw_data[17];
-
+                match symbol {
+                    Symbol::Primary {
+                        n_name: _,
+                        n_zeroes: _,
+                        n_offset: _,
+                        n_value: _,
+                        n_scnum: _,
+                        n_type: _,
+                        n_numaux,
+                        storage_class,
+                    } => {
                         if n_numaux > 0 {
                             is_aux = true;
                             aux_index = n_numaux;
-                        }
-
-                        SymbolTableEntry::Primary {
-                            n_name,
-                            n_zeroes,
-                            n_offset,
-                            n_value,
-                            n_scnum,
-                            n_type,
-                            n_sclass,
-                            n_numaux,
+                            sclass = storage_class;
                         }
                     },
-                };
+                    _ => {}
+                }
 
-                symbols.push(symbol_table_entry);
+                symbols.push(SymbolTableEntry { symbol });
             }
         }
 
@@ -722,30 +862,40 @@ impl<'s> FileContainer<'s> {
             return;
         }
 
-        for (i, e) in self.symbols.iter().enumerate() {
+        println!("[");
 
-            match e {
-                SymbolTableEntry::Primary {
+        for (i, e) in self.symbols.iter().enumerate() {
+            let symbol = &e.symbol;
+
+            match symbol {
+                Symbol::Primary {
                     n_name,
                     n_zeroes,
                     n_offset,
                     n_value,
                     n_scnum,
                     n_type,
-                    n_sclass,
                     n_numaux,
+                    storage_class,
                 } => {
-                    let (name, sclass) = if *n_zeroes == 0 {
-                        (self.strings.string_at(*n_offset).unwrap_or("???"), "m2")
+                    let name = if *n_zeroes == 0 {
+                        self.strings.string_at(*n_offset).unwrap_or("???")
                     } else {
-                        (buf_to_str(n_name).unwrap_or("???"), "m1")
+                        buf_to_str(n_name).unwrap_or("???")
                     };
 
-                    println!("    [{:4}] {:2} name='{}' value=0x{:x} scnum={} type={:x} sclass={:x} numaux={}",
-                             i, sclass, name, n_value, n_scnum, n_type, n_sclass, n_numaux);
+                    println!("    {{");
+                    println!("        index: {},", i);
+                    println!("        name: '{}',", name);
+                    println!("        value: '0x{:x}',", n_value);
+                    println!("        section: {},", n_scnum);
+                    println!("        type: '0x{:02x}',", n_type);
+                    println!("        class: '{:?}',", storage_class);
+                    println!("        numaux: {}", n_numaux);
 
                 },
-                SymbolTableEntry::Auxiliary {
+                Symbol::Auxiliary {
+                    x_fname,
                     x_tagndx,
                     x_lnno,
                     x_size,
@@ -755,14 +905,32 @@ impl<'s> FileContainer<'s> {
                     x_dimen,
                     x_tvndx,
                 } => {
-                    print!("    [{:4}]  a tagndx={} lnno=0x{:04x} size=0x{:04x} fsize=0x{:04x} ",
-                           i, x_tagndx, x_lnno, x_size, x_fsize);
-
-                    println!("lnnoptr=0x{:08x} endndx={} dimen0={} dimen2={} tvndx={}",
-                             x_lnnoptr, x_endndx, x_dimen[0], x_dimen[1], x_tvndx);
+                    println!("    {{");
+                    println!("        index: {},", i);
+                    if x_fname.is_some() {
+                        println!("        filename: '{}',", x_fname.as_ref().unwrap());
+                    } else {
+                        println!("        tagindex: {},", x_tagndx);
+                        println!("        lnno: '0x{:x}',", x_lnno);
+                        println!("        size: '0x{:x}',", x_size);
+                        println!("        fsize: '0x{:x}',", x_fsize);
+                    }
+                    println!("        lnnoptr: '0x{:x}',", x_lnnoptr);
+                    println!("        endndx: {},", x_endndx);
+                    println!("        dim0: {},", x_dimen[0]);
+                    println!("        dim1: {},", x_dimen[1]);
+                    println!("        tvndx: {}", x_tvndx);
                 }
             }
+
+            if i < self.symbols.len() - 1 {
+                println!("    }},")
+            } else {
+                println!("    }}");
+            }
         }
+
+        println!("]");
     }
 
     pub fn dump_strings_table(&self) {
@@ -770,12 +938,26 @@ impl<'s> FileContainer<'s> {
 
         let strings = &self.strings;
 
-        if strings.string_count > 0 {
-            for s_tuple in &strings.strings {
-                println!("    [{:4}]    {}", s_tuple.0, s_tuple.1);
+        if strings.strings.len() > 0 {
+            // Strings are kept in an unsorted hash map, so they should
+            // be sorted before printing out.
+            let mut keys: Vec<&u32> = strings.strings.keys().collect();
+            keys.sort();
+            for key in keys.iter() {
+                if let Some(val) = &strings.strings.get(key) {
+                    println!("    [{:4}]    {}", key, val);
+                }
             }
         } else {
             println!("    No Strings");
         }
+    }
+
+    pub fn section_data(&self, sec_num: usize) -> Option<&Vec<u8>> {
+        if let Some(section) = &self.sections.get(sec_num) {
+            return Some(&section.data);
+        }
+
+        None
     }
 }

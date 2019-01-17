@@ -1,5 +1,6 @@
 use std::error;
 use std::fmt;
+use std::io;
 
 pub type ReadResult<T> = std::result::Result<T, CoffError>;
 
@@ -57,5 +58,45 @@ impl error::Error for CoffError {
 
     fn cause(&self) -> Option<&error::Error> {
         None
+    }
+}
+
+///
+/// Error while decoding instruction stream
+///
+#[derive(Debug)]
+pub enum DecodeError {
+    IoError(io::Error),
+    Parse,
+}
+
+impl fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            DecodeError::IoError(error) => write!(f, "io error on decode: {:?}", error),
+            DecodeError::Parse => write!(f, "parse error on decode"),
+        }
+    }
+}
+
+impl error::Error for DecodeError {
+    fn description(&self) -> &str {
+        match self {
+            DecodeError::IoError(_) => "io error on decode",
+            DecodeError::Parse => "parse error on decode",
+        }
+    }
+
+    fn cause(&self) -> Option<&error::Error> {
+        match self {
+            DecodeError::IoError(error) => Some(error),
+            DecodeError::Parse => None,
+        }
+    }
+}
+
+impl From<io::Error> for DecodeError {
+    fn from(error: io::Error) -> Self {
+        DecodeError::IoError(error)
     }
 }
